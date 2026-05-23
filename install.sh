@@ -8,8 +8,9 @@
 #  and the model knows to save:
 #    1. writes <ENV_FILE>  (your key + PATH + per-session id, chmod 600)
 #    2. sources it from your shell profile (idempotent marked block)
-#    3. installs the SessionStart hook into ~/.claude/settings.json (auto-recall)
-#    4. drops the "<BRAND> Memory protocol" into ~/.claude/CLAUDE.md (auto-save)
+#    3. installs SessionStart + PostCompact + Stop hooks (~/.claude/settings.json)
+#    4. drops the "<BRAND> Memory protocol" into ~/.claude/CLAUDE.md
+#    5. installs /<brand>-recall and /<brand>-save slash commands (~/.claude/commands/)
 #
 #  Usage:
 #    ./install.sh                      # prompts for your key if none in the env
@@ -52,6 +53,7 @@ SETTINGS="$HOME/.claude/settings.json"
 CLAUDE_MD="$HOME/.claude/CLAUDE.md"
 PYBIN="$(command -v python3 || true)"
 HOOK_PATH="$KIT_DIR/hooks/session_start_memory.py"
+STOP_HOOK_PATH="$KIT_DIR/hooks/session_stop_memory.py"
 START="# >>> $MARKER >>>"
 END="# <<< $MARKER <<<"
 MD_START="<!-- $MARKER:start -->"
@@ -67,16 +69,22 @@ uninstall() {
   strip_block "$CLAUDE_MD" "$MD_START" "$MD_END"
   strip_block "$HOME/.cursor/rules" "<!-- $MARKER:cursor:start -->" "<!-- $MARKER:cursor:end -->"
   rm -f "$ENV_FILE"
+  # Remove slash commands
+  _BRAND_LOWER="$(echo "$BRAND" | tr '[:upper:]' '[:lower:]')"
+  rm -f "$HOME/.claude/commands/${_BRAND_LOWER}-recall.md" \
+        "$HOME/.claude/commands/${_BRAND_LOWER}-save.md"
+  # Remove all hooks from this kit (SessionStart, PostCompact, Stop)
   if [ -f "$SETTINGS" ] && [ -n "$PYBIN" ]; then
-    SETTINGS="$SETTINGS" HOOK_PATH="$HOOK_PATH" "$PYBIN" - <<'PY'
+    SETTINGS="$SETTINGS" KIT_DIR="$KIT_DIR" "$PYBIN" - <<'PY'
 import json,os
-p=os.environ["SETTINGS"]; hook=os.environ["HOOK_PATH"]
+p=os.environ["SETTINGS"]; kit=os.environ["KIT_DIR"]
 try: d=json.load(open(p))
 except Exception: raise SystemExit
-ss=(d.get("hooks") or {}).get("SessionStart") or []
-ss=[g for g in ss if not any(hook in h.get("command","") for h in g.get("hooks",[]))]
-if ss: d["hooks"]["SessionStart"]=ss
-elif "SessionStart" in d.get("hooks",{}): d["hooks"].pop("SessionStart",None)
+for event in list((d.get("hooks") or {}).keys()):
+    groups=d["hooks"][event]
+    groups=[g for g in groups if not any(kit in h.get("command","") for h in g.get("hooks",[]))]
+    if groups: d["hooks"][event]=groups
+    else: d["hooks"].pop(event,None)
 json.dump(d,open(p,"w"),indent=2)
 PY
   fi
@@ -132,38 +140,80 @@ strip_block "$PROFILE" "$START" "$END"
 { echo "$START"; echo "[ -f \"$ENV_FILE\" ] && source \"$ENV_FILE\""; echo "$END"; } >> "$PROFILE"
 echo "✓ wired $PROFILE"
 
-# ── 3. SessionStart hook → auto-recall in Claude Code ──
+# ── 3. Claude Code hooks: SessionStart (recall) + PostCompact (re-recall) + Stop (save nudge) ──
 mkdir -p "$(dirname "$SETTINGS")"
-HOOK_CMD="$PYBIN $HOOK_PATH"
-SETTINGS="$SETTINGS" HOOK_CMD="$HOOK_CMD" HOOK_PATH="$HOOK_PATH" "$PYBIN" - <<'PY'
+START_CMD="$PYBIN $HOOK_PATH"
+STOP_CMD="$PYBIN $STOP_HOOK_PATH"
+SETTINGS="$SETTINGS" START_CMD="$START_CMD" START_HOOK="$HOOK_PATH" \
+  STOP_CMD="$STOP_CMD" STOP_HOOK="$STOP_HOOK_PATH" "$PYBIN" - <<'PY'
 import json,os
-p=os.environ["SETTINGS"]; cmd=os.environ["HOOK_CMD"]; hook=os.environ["HOOK_PATH"]
+p=os.environ["SETTINGS"]
+start_cmd=os.environ["START_CMD"]; start_hook=os.environ["START_HOOK"]
+stop_cmd=os.environ["STOP_CMD"];   stop_hook=os.environ["STOP_HOOK"]
 d={}
 if os.path.exists(p):
     try: d=json.load(open(p))
     except Exception: d={}
-ss=d.setdefault("hooks",{}).setdefault("SessionStart",[])
-if not any(hook in h.get("command","") for g in ss for h in g.get("hooks",[])):
-    ss.append({"hooks":[{"type":"command","command":cmd}]})
+h=d.setdefault("hooks",{})
+# SessionStart — inject team context at session open
+ss=h.setdefault("SessionStart",[])
+if not any(start_hook in c.get("command","") for g in ss for c in g.get("hooks",[])):
+    ss.append({"hooks":[{"type":"command","command":start_cmd}]})
+# PostCompact — re-inject after context compression so memory survives /compact
+pc=h.setdefault("PostCompact",[])
+if not any(start_hook in c.get("command","") for g in pc for c in g.get("hooks",[])):
+    pc.append({"hooks":[{"type":"command","command":start_cmd}]})
+# Stop — nudge Claude to save wrap-up if nothing saved this session
+st=h.setdefault("Stop",[])
+if not any(stop_hook in c.get("command","") for g in st for c in g.get("hooks",[])):
+    st.append({"hooks":[{"type":"command","command":stop_cmd}]})
 json.dump(d,open(p,"w"),indent=2)
 PY
-echo "✓ installed SessionStart hook in $SETTINGS"
+echo "✓ installed SessionStart + PostCompact + Stop hooks in $SETTINGS"
 
 # ── 4. the protocol block → tells the model to recall/save ──
 strip_block "$CLAUDE_MD" "$MD_START" "$MD_END"
 mkdir -p "$(dirname "$CLAUDE_MD")"
+_BRAND_LOWER="$(echo "$BRAND" | tr '[:upper:]' '[:lower:]')"
 cat >> "$CLAUDE_MD" <<EOF
 $MD_START
-## $BRAND Memory protocol
-This machine shares continued context through the $BRAND memory layer (\`$CLI_NAME\`).
-- At the start of a task, run \`$CLI_NAME recall\` (or \`$CLI_NAME search <kw>\`) and treat results as prior context.
-- When you make a decision or learn something non-obvious, save it: \`$CLI_NAME save "<1-2 sentences>" --kind decision --tags area\`.
-- Saves are private to your sessions by default; add \`--share\` to put it in your team pool.
+## $BRAND Memory — required protocol
+
+This machine is part of the $BRAND team memory pool. Context is shared across all
+teammates' sessions via \`$CLI_NAME\` (backed by atlas.axe.observer).
+
+**Rules — not suggestions:**
+- **Session start:** run \`$CLI_NAME recall\` before starting any task. Treat results as prior context.
+- **After any significant decision, finding, or client preference:** save it immediately.
+  \`$CLI_NAME save "<1-2 sentences>" --kind decision|finding --share --tags ${_BRAND_LOWER},<area>\`
+  Do NOT let context die in this session. If in doubt, save it.
+- **Search before re-deriving:** \`$CLI_NAME search "<keyword>"\` — a teammate may have already logged it.
+- **Use /${_BRAND_LOWER}-recall** and **/${_BRAND_LOWER}-save** slash commands for zero-friction access.
 $MD_END
 EOF
 echo "✓ added protocol to $CLAUDE_MD"
 
-# ── 5. Cursor rules → tells Cursor agent to recall/save ──
+# ── 5. Slash commands → /<brand>-recall and /<brand>-save in Claude Code ──
+_BRAND_LOWER="$(echo "$BRAND" | tr '[:upper:]' '[:lower:]')"
+_CMD_DIR="$HOME/.claude/commands"
+mkdir -p "$_CMD_DIR"
+cat > "$_CMD_DIR/${_BRAND_LOWER}-recall.md" <<EOF
+Run \`$CLI_NAME recall\` and briefly surface the key team context from the results.
+EOF
+cat > "$_CMD_DIR/${_BRAND_LOWER}-save.md" <<EOF
+Save an important decision or finding to the $BRAND team memory pool.
+
+If the user specified what to save, run immediately:
+\`$CLI_NAME save "<their text>" --kind decision --share --tags ${_BRAND_LOWER}\`
+
+If the user did not specify what to save, ask: "What's the key decision or finding? (1-2 sentences)"
+then run the command with their answer.
+
+Always include \`--share\` so the whole team sees it. Kind options: note | decision | finding | task
+EOF
+echo "✓ installed /${_BRAND_LOWER}-recall and /${_BRAND_LOWER}-save commands in $_CMD_DIR"
+
+# ── 6. Cursor rules → tells Cursor agent to recall/save ──
 CURSOR_RULES="$HOME/.cursor/rules"
 CURSOR_START="<!-- $MARKER:cursor:start -->"
 CURSOR_END="<!-- $MARKER:cursor:end -->"
@@ -193,10 +243,15 @@ else
   echo "  (Cursor not detected — skipping ~/.cursor/rules)"
 fi
 
+_BRAND_LOWER="$(echo "$BRAND" | tr '[:upper:]' '[:lower:]')"
 echo ""
 echo "Done. $BRAND memory is attached as $WHO."
 echo "→ run:  source \"$ENV_FILE\"   (or open a new terminal)"
 echo "→ then: $CLI_NAME recall"
 echo ""
-echo "  Claude Code: auto-recalls at session start (SessionStart hook active)"
-echo "  Cursor:      see ~/.cursor/rules for the $BRAND Memory section"
+echo "  Claude Code hooks wired:"
+echo "    SessionStart  — injects team context at session open"
+echo "    PostCompact   — re-injects after /compact so memory survives compression"
+echo "    Stop          — nudges Claude to save a wrap-up if nothing saved this session"
+echo "  Slash commands: /${_BRAND_LOWER}-recall  /${_BRAND_LOWER}-save"
+echo "  Cursor:  see ~/.cursor/rules for the $BRAND Memory section"
