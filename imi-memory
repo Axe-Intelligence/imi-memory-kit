@@ -34,6 +34,9 @@ import urllib.request
 
 ATLAS = os.environ.get("AXE_MEMORY_URL", "https://atlas.axe.observer").rstrip("/")
 SESSION = os.environ.get("AXE_SESSION_ID", "").strip()
+# IMI_USER sets the from: attribution tag on CLI saves (e.g. "jlewis").
+# Install script derives it from the user's email and writes it to .imi-memory.env.
+_IMI_USER = os.environ.get("IMI_USER", "").strip()
 # macOS system Python ships without a CA bundle; AXE endpoints are ours.
 _SSL = ssl._create_unverified_context()
 
@@ -109,10 +112,14 @@ def cmd_save(args):
     if not KEY:
         print(f"{BRAND}_API_KEY required to save", file=sys.stderr)
         return 1
+    explicit_tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+    # Auto-inject from:<user> so the Pulse AI panel and recall show who saved this.
+    from_tag = f"from:{_IMI_USER}" if _IMI_USER else None
+    tags = ([from_tag] if from_tag and from_tag not in explicit_tags else []) + explicit_tags
     body = {
         "content": args.text.strip(),
         "kind": args.kind,
-        "tags": [t.strip() for t in (args.tags or "").split(",") if t.strip()],
+        "tags": tags,
         "source": BRAND.lower() + "-memory",
     }
     if args.space:
