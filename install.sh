@@ -22,7 +22,23 @@ set -euo pipefail
 # Resolve the kit dir (this script's location), following symlinks.
 SRC="${BASH_SOURCE[0]}"
 while [ -h "$SRC" ]; do DIR="$(cd -P "$(dirname "$SRC")" && pwd)"; SRC="$(readlink "$SRC")"; [[ $SRC != /* ]] && SRC="$DIR/$SRC"; done
-KIT_DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+KIT_DIR="$(cd -P "$(dirname "$SRC")" && pwd 2>/dev/null || echo "")"
+
+# Bootstrap: when run via `bash <(curl ...)`, BASH_SOURCE[0] is /dev/fd/N so
+# KIT_DIR resolves to /dev/fd and kit.conf is unreachable. Detect by checking
+# for kit.conf; clone to ~/imi-memory-kit and re-exec from there.
+_REPO_URL="${REPO_URL:-https://github.com/memjar/imi-memory-kit.git}"
+_KIT_DIR_NAME="${KIT_DIR_NAME:-imi-memory-kit}"
+if [ ! -f "$KIT_DIR/kit.conf" ]; then
+  _DEST="$HOME/$_KIT_DIR_NAME"
+  printf "→ Downloading %s to %s ...\n" "$_KIT_DIR_NAME" "$_DEST" >&2
+  if [ -d "$_DEST/.git" ]; then
+    git -C "$_DEST" pull --quiet >&2
+  else
+    git clone --quiet "$_REPO_URL" "$_DEST" >&2
+  fi
+  exec bash "$_DEST/install.sh" "$@"
+fi
 
 # ── Branding (the only per-kit difference) ──
 # shellcheck disable=SC1091
