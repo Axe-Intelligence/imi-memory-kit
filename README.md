@@ -1,6 +1,6 @@
 # imi-memory-kit
 
-Portable, attributed continued-context for the IMI team (Mike, Daniel) — works
+Portable, attributed continued-context for the **IMI team** — works
 in any AI coding session (Claude Code, Cursor, Windsurf, raw curl). One shared
 memory layer (`atlas.axe.observer`); each teammate saves with their own
 identity, gets a private space by default, and shares through the **IMI** team
@@ -19,7 +19,7 @@ Attaches the memory layer to your terminal **and** Claude Code:
 Re-runnable (idempotent). `./install.sh --uninstall` removes all of it. Then
 open a new terminal (or `source ~/.imi-memory.env`) and run `imi-memory recall`.
 
-Ask James for your personal key (one per person, e.g. `imi-mike`).
+Contact your AXE Technologies admin for your personal key (one per team member).
 
 ## Files
 | File | What |
